@@ -1,0 +1,392 @@
+---
+title: "ECON460_final_project"
+date: "2022-11-22"
+output: html_document
+---
+
+#### Group member: Zixuan Jia, Ziqi Huang, Guangdi Zhong, Shubo Wang, Xintong Chen, Haolin Dong
+
+#### The project amis to use supervised learning models to identify customers who are likely to churn in the future. Furthermore, we will analyze top factors that influence user retention.
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(caTools)
+library(plyr)
+library(dplyr)
+library(purrr)
+library(caret)
+library(randomForest)
+library(pROC)
+library(gamlr)
+library(kknn)
+library(class)
+set.seed(521)
+```
+
+```{r}
+bank_data <- read.csv('bank_data.csv')
+head(bank_data)
+```
+### 1. Data Exploration
+##### 1.1 Understand the Raw Data
+
+```{r}
+summary(bank_data)
+```
+
+```{r}
+# check missing values
+is.null(bank_data)
+```
+
+```{r}
+# Get target variable
+y <- bank_data$Exited
+head(y)
+```
+
+
+#### 1.2 Features
+
+```{r}
+# check the feature distribution
+# boxplot for numerical feature
+p1 <- ggplot(bank_data, aes(x=Exited, y=CreditScore, group = Exited, fill=factor(Exited))) + 
+  geom_boxplot()
+p2 <- ggplot(bank_data, aes(x=Exited, y=Age, group = Exited, fill=factor(Exited))) + 
+  geom_boxplot()
+p3 <- ggplot(bank_data, aes(x=Exited, y=Tenure, group = Exited,fill=factor(Exited))) + 
+  geom_boxplot()
+p4 <- ggplot(bank_data, aes(x=Exited, y=NumOfProducts, group = Exited,fill=factor(Exited))) + 
+  geom_boxplot()
+p5 <- ggplot(bank_data, aes(x=Exited, y=Balance, group = Exited,fill=factor(Exited))) + 
+  geom_boxplot()
+p6 <- ggplot(bank_data, aes(x=Exited, y=EstimatedSalary, group = Exited,fill=factor(Exited))) + 
+  geom_boxplot()
+```
+
+```{r}
+ggarrange(p1, p2, p3, p4, p5, p6,
+          ncol = 2, nrow = 3)
+```
+
+
+```{r}
+# categorical feature
+p7 <- ggplot() + geom_bar(data = bank_data,aes(x = Exited, fill=factor(Geography)), position="dodge")
+p8 <- ggplot() + geom_bar(data = bank_data,aes(x = Exited, fill=factor(Gender)), position="dodge")
+p9 <- ggplot() + geom_bar(data = bank_data,aes(x = Exited, fill=factor(HasCrCard)), position="dodge")
+p10 <- ggplot() + geom_bar(data = bank_data,aes(x = Exited, fill=factor(IsActiveMember)), position="dodge")
+```
+
+```{r}
+ggarrange(p7, p8, p9, p10,
+          ncol = 2, nrow = 2)
+```
+
+### 2. Feature Preprocessing
+
+```{r}
+# Get feature space by dropping useless feature
+X <- bank_data[,-which(colnames(bank_data) %in% c('RowNumber','CustomerId','Surname','Exited'))]
+head(X)
+```
+
+
+```{r}
+str(X)
+```
+
+```{r}
+cat_cols <- X[,c('Geography', 'Gender')]
+str(cat_cols)
+```
+
+```{r}
+num_cols <- X[,-which(colnames(X) %in% c('Geography', 'Gender'))]
+str(num_cols)
+```
+
+#### Split Dataset
+
+```{r}
+table(bank_data$Exited)
+```
+
+```{r}
+# 25% test 75% training
+split = sample.split(bank_data$Exited,SplitRatio = .75)
+train_data = subset(bank_data,split == TRUE)
+test_data  = subset(bank_data,split == FALSE)
+```
+
+```{r}
+table(train_data$Exited)
+table(test_data$Exited)
+```
+
+
+
+```{r}
+# male to 1, female to 0
+train_data$Gender <- revalue(train_data$Gender, c("Male"=1))
+train_data$Gender <- revalue(train_data$Gender, c("Female"=0))
+train_data$Gender <- as.integer(train_data$Gender)
+```
+
+```{r}
+# One hot encoding
+# another way: get_dummies
+train_data <- cbind(select_if(train_data,is.numeric),
+                    as.data.frame(model.matrix(~Geography-1,train_data)))
+head(train_data)
+```
+
+```{r}
+# male to 1, female to 0
+test_data$Gender <- revalue(test_data$Gender, c("Male"=1))
+test_data$Gender <- revalue(test_data$Gender, c("Female"=0))
+test_data$Gender <- as.integer(test_data$Gender)
+```
+
+```{r}
+# One hot encoding
+# another way: get_dummies
+test_data <- cbind(select_if(test_data,is.numeric),
+                   as.data.frame(model.matrix(~Geography-1,test_data)))
+```
+
+```{r}
+head(test_data)
+```
+
+```{r}
+train_data <- train_data[,-which(colnames(train_data) %in% c('RowNumber','CustomerId'))]
+X_train <- train_data[,-which(colnames(train_data) %in% c('RowNumber','CustomerId','Exited'))]
+y_train <- train_data[,'Exited']
+```
+
+```{r}
+test_data <- test_data[,-which(colnames(test_data) %in% c('RowNumber','CustomerId'))]
+X_test <- test_data[,-which(colnames(test_data) %in% c('RowNumber','CustomerId','Exited'))]
+y_test <- test_data[,'Exited']
+```
+
+```{r}
+head(train_data)
+```
+
+#### Standardize/Normalize Data
+
+```{r}
+df <- scale(X_train[,c('CreditScore', 'Age', 'Tenure', 'Balance', 'NumOfProducts', 'EstimatedSalary')], center=T,scale=T)
+X_train <- cbind(as.data.frame(df), X_train[,c('Gender','HasCrCard','IsActiveMember','GeographyFrance','GeographyGermany',
+                                    'GeographySpain')])
+
+df <- scale(train_data[,c('CreditScore', 'Age', 'Tenure', 'Balance', 'NumOfProducts', 'EstimatedSalary')], center=T,scale=T)
+train_data <- cbind(as.data.frame(df),train_data[,c('Gender','HasCrCard','IsActiveMember','GeographyFrance', 'GeographyGermany','GeographySpain','Exited')])
+```
+
+
+```{r}
+df <- scale(X_test[,c('CreditScore', 'Age', 'Tenure', 'Balance', 'NumOfProducts', 'EstimatedSalary')], center=T,scale=T)
+X_test <- cbind(as.data.frame(df), X_test[,c('Gender','HasCrCard','IsActiveMember','GeographyFrance','GeographyGermany',
+                                    'GeographySpain')])
+
+df <- scale(test_data[,c('CreditScore', 'Age', 'Tenure', 'Balance', 'NumOfProducts', 'EstimatedSalary')], center=T,scale=T)
+test_data <- cbind(as.data.frame(df),test_data[,c('Gender','HasCrCard','IsActiveMember','GeographyFrance', 'GeographyGermany','GeographySpain','Exited')])
+```
+
+```{r}
+head(train_data)
+```
+
+### 3. model training and result evaluation
+#### 3.1 Model Training
+
+build models
+
+```{r}
+# Logistic Regression
+classifier_logistic <- glm(Exited~.,data=train_data,family = "binomial")
+summary(classifier_logistic)
+```
+
+```{r}
+# K Nearest Neighbors
+classifier_KNN<-kknn(Exited~.,train_data,test_data,distance=1,kernel="triangular")
+summary(classifier_KNN)
+```
+
+```{r}
+fit <- fitted(classifier_KNN)
+```
+
+```{r}
+classifier_KNN <- train(as.factor(Exited)~.,train_data,
+               method = 'knn')
+classifier_KNN
+```
+
+```{r}
+# Random Forest
+classifier_RF <- randomForest(as.factor(Exited) ~ ., data = train_data, importance = TRUE)
+classifier_RF
+```
+
+#### 3.2 Find optimal hyperparameters
+##### 3.2.1 Logistic Regression
+
+```{r}
+# Logistic Regression
+classifier_logistic_2<-step(object = classifier_logistic,trace = 0)
+summary(classifier_logistic_2)
+```
+
+```{r}
+anova(object = classifier_logistic_2,test = "Chisq")
+```
+
+
+```{r}
+prob_LR<-predict(object =classifier_logistic_2,newdata=test_data,type = "response")
+pred_LR<-ifelse(prob_LR>=0.5,1, 0)
+```
+
+```{r}
+confusionMatrix(table(pred_LR,test_data$Exited))
+```
+
+```{r}
+roc <- function(p,y, ...){
+  y <- factor(y)
+  n <- length(p)
+  p <- as.vector(p)
+  Q <- p > matrix(rep(seq(0,1,length=100),n),ncol=100,byrow=TRUE)
+  specificity <- colMeans(!Q[y==levels(y)[1],])
+  sensitivity <- colMeans(Q[y==levels(y)[2],])
+  plot(1-specificity, sensitivity, type="l", ...)
+  abline(a=0,b=1,lty=2,col=8)
+}
+
+roc(p=prob_LR, y = test_data$Exited, bty = 'n', main = 'ROC Curve')
+```
+
+
+```{r}
+# lasso
+logit_lasso <- cv.gamlr(X_train, y_train, family="binomial", verb=TRUE)
+par(mfrow=c(1,3))
+plot(logit_lasso$gamlr)
+plot(logit_lasso) # plot of CV error against lambda
+plot(log(logit_lasso$gamlr$lambda), AICc(logit_lasso$gamlr))
+```
+
+```{r}
+cat("total number of coefficients:", length(coef(logit_lasso)), "\n")
+cat("number of nonzero coefficients for CV-optimal lambda:", sum(coef(logit_lasso, select="min")!=0), "\n")
+cat("number of nonzero coefficients for AICc-optimal lambda:", sum(coef(logit_lasso$gamlr)!=0), "\n")
+```
+
+```{r}
+prob_lasso <- predict(logit_lasso$gamlr, X_test, type="response")
+pred_LR<-ifelse(prob_lasso>=0.5,1, 0)
+```
+
+```{r}
+confusionMatrix(table(pred_LR,test_data$Exited))
+```
+
+```{r}
+roc(p=prob_lasso, y = test_data$Exited, bty = 'n', main = 'ROC Curve')
+```
+
+#### 3.2.2 KNN
+
+```{r}
+control <- trainControl(method = 'cv',number = 10)
+classifier_KNN <- train(as.factor(Exited)~.,train_data,
+               method = 'knn',
+               trControl = control,
+               tuneLength = 5)
+```
+
+```{r}
+classifier_KNN
+```
+
+```{r}
+pred_knn <- predict(classifier_KNN,newdata = test_data)
+confusionMatrix(table(pred_knn,test_data$Exited))
+```
+```{r}
+pred_knn <- predict(classifier_KNN,newdata = test_data)
+confusionMatrix(table(pred_knn,test_data$Exited))
+```
+
+#### 3.2.2 Random Forest
+
+```{r}
+importance(classifier_RF,type=1) 
+```
+
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 10) 
+#grid <- expand.grid(.model='tree', .mtry = as.dataframe(c(2,4,6,8)),.ntree=as.dataframe(c(400,500,600,700)))
+rf_2<-train(as.factor(Exited)~.,data=train_data,method='rf',metric='Accuracy',
+            trControl=ctrl)
+```
+
+
+```{r}
+rf_2
+```
+
+```{r}
+ntree_fit<-randomForest(as.factor(Exited)~., data=train_data, mtry=7, ntree=1000)
+plot(ntree_fit)
+```
+
+```{r}
+rf_3 <- randomForest(as.factor(Exited)~., data=train_data, mtry=7, ntree=200, importance=T )
+rf_3
+```
+
+```{r}
+classifier_RF
+```
+
+```{r}
+pred_RF <- predict(rf_3,newdata = test_data)
+confusionMatrix(table(pred_RF,test_data$Exited))
+```
+
+```{r}
+pred_RF <- predict(classifier_RF,newdata = test_data)
+confusionMatrix(table(pred_RF,test_data$Exited))
+```
+
+
+```{r}
+summary(rf_3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
